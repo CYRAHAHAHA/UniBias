@@ -1,0 +1,6 @@
+"ag_news seed_value: 10"
+"biased FFN neurons:{17: [9778], 24: [2615], 27: [10130], 30: [2456], 31: [9198]}-4"
+-4
+"biased attention heads:{16: [11], 18: [11]}0.0"
+0.0
+"Unibias: \n\nclassification_accuracy: 0.834[[690  29  24   4]\n [  8 763   4   0]\n [ 98   0 584  20]\n [109   7 195 465]]"

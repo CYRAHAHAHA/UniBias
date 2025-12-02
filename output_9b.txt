@@ -1,0 +1,29 @@
+🔍 DIAGNOSTIC: Checking if debiasing is active...
+
+✅ Biased FFN Neurons Found:
+   Layer 17: 1 neuron(s) - [9778]
+   Layer 24: 1 neuron(s) - [2615]
+   Layer 27: 1 neuron(s) - [10130]
+   Layer 30: 1 neuron(s) - [2456]
+   Layer 31: 1 neuron(s) - [9198]
+
+   Total MLPforward hooks attached: 0
+   ⚠️ Warning: No FFN hooks found - debiasing may not be applied!
+
+--------------------------------------------------------------------------------
+
+✅ Biased Attention Heads Found:
+   Layer 16: 1 head(s) - [11]
+   Layer 18: 1 head(s) - [11]
+
+   Checking mask values:
+      Layer 16, Head 11: ✅ MASKED (0.0)
+      Layer 18, Head 11: ✅ MASKED (0.0)
+
+--------------------------------------------------------------------------------
+
+📋 SUMMARY:
+✅ UniBias found and applied debiasing to biased components
+✅ Your model is running with UniBias active!
+
+💡 To truly verify effectiveness, run cell 9a to compare with baseline.
