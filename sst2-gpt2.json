@@ -1,0 +1,9 @@
+"sst2 seed_value: 10"
+"biased FFN neurons:{19: [3548]}-1"
+-1
+"biased attention heads:{}0.0"
+0.0
+"Unibias: \n\nclassification_accuracy: 0.5114678899082569[[  2 426]\n [  0 444]]"
+"CC_calibrate: 0.6479357798165137[[124 304]\n [  3 441]]"
+"DC_calibrate: 0.7935779816513762[[374  54]\n [126 318]]"
+"PC_calibrate: 0.7568807339449541[[241 187]\n [ 25 419]]"

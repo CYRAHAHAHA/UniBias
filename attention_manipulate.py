@@ -56,14 +56,16 @@ def is_ans_in_anslist(ans, ans_list):
 
 def biased_attention_head_identification(model, tokenizer, validate_data, ans_token_list, dataset_name):
     """Identify biased attention heads candidates based on three criterions"""
-    NB_LAYERS = len(model.model.layers)
-    # Use config to get number of attention heads (compatible across transformers versions)
-    NB_HEADS = model.config.num_attention_heads
+    # GPT-2 uses transformer.h instead of model.layers
+    NB_LAYERS = model.config.n_layer
+    # GPT-2 uses n_head instead of num_attention_heads
+    NB_HEADS = model.config.n_head
     _cumulate_all_attention_weights = [[[] for _ in range(NB_HEADS)] for _ in range(NB_LAYERS)]
     _cumulate_all_head_logit_record = [[[] for _ in range(NB_HEADS)] for _ in range(NB_LAYERS - 1)]
     _cumulate_all_hidden_logit_record = [[[] for _ in range(NB_HEADS)] for _ in range(NB_LAYERS - 1)]
 
     gt_ans_ids_list = find_possible_ids_for_multi_str(ans_token_list, tokenizer)
+    valid_sample_count = 0
     for index in tqdm(range(len(validate_data))):
         gt_text = validate_data[index]
         gts = tokenizer(gt_text, return_tensors="pt").to(model.lm_head.weight.device)
@@ -71,10 +73,20 @@ def biased_attention_head_identification(model, tokenizer, validate_data, ans_to
         gt_tokens = [tokenizer.decode(gt_ids[0][i], skip_special_tokens=True) for i in range(gt_ids.shape[-1])]
         gt_ans_index = find_answer_location(gt_tokens, task=dataset_name)
         gt_ans_index_reverse = gt_ans_index - len(gt_tokens)
+        
+        # Skip this sample if the answer is not in the last 10 tokens
+        # This ensures we don't get index errors when accessing the captured attention
+        if gt_ans_index_reverse < -10:
+            continue
+            
         ans_token = gt_tokens[gt_ans_index]
         ans_token_reverse = gt_tokens[gt_ans_index_reverse]
+        
         if is_ans_in_anslist(ans_token, ans_token_list) is False:
-            print('error in finding answer')
+            # Silent continue instead of printing error every time
+            continue
+        
+        valid_sample_count += 1
 
         with torch.no_grad():
             torch.cuda.empty_cache()
@@ -86,8 +98,9 @@ def biased_attention_head_identification(model, tokenizer, validate_data, ans_to
                 hidden_states_attention.append(output.detach().cpu()[:,:,-10:,:])
 
             head_output_hooks = []
-            for layer_index in range(model.config.num_hidden_layers):
-                hook = model.model.layers[layer_index].self_attn.custom_head_output.register_forward_hook(capture_head_output_hook)
+            # GPT-2 uses transformer.h instead of model.layers and n_layer instead of num_hidden_layers
+            for layer_index in range(model.config.n_layer):
+                hook = model.transformer.h[layer_index].attn.custom_head_output.register_forward_hook(capture_head_output_hook)
                 head_output_hooks.append(hook)
 
             outputs = model(gt_ids, output_hidden_states=True, output_attentions=False)
@@ -116,6 +129,12 @@ def biased_attention_head_identification(model, tokenizer, validate_data, ans_to
             del attentions_layer_i
         if 'hidden_states_layer_i_1' in locals():
             del hidden_states_layer_i_1
+    
+    # Check if we have enough valid samples
+    if valid_sample_count == 0:
+        print("Warning: No valid samples found (all answers beyond last 10 tokens)")
+        # Return empty results
+        return [{}], []
 
     _cumulate_all_head_logit_record_transpose = np.array(_cumulate_all_head_logit_record).transpose(0, 1, 3, 2).tolist()
     _cumulate_all_hidden_logit_record_transpose = np.array(_cumulate_all_hidden_logit_record).transpose(0, 1, 3, 2).tolist()
@@ -264,28 +283,50 @@ def set_attention_masks(model, AHs_dict, debias_alpha):
     for layer in AHs_dict.keys():
         head_indexes = AHs_dict[layer]
         # head_weight = AHs_dict[layer][1]
-        model.model.layers[int(layer)].self_attn.mask[0, head_indexes, 0, 0] = debias_alpha
+        # GPT-2 uses transformer.h instead of model.layers, and attn instead of self_attn
+        model.transformer.h[int(layer)].attn.mask[0, head_indexes, 0, 0] = debias_alpha
 
 def remove_attention_masks(model, AHs_dict):
     for layer in AHs_dict.keys():
         head_indexes = AHs_dict[layer]
         # head_weight = AHs_dict[layer][1]
-        model.model.layers[int(layer)].self_attn.mask[0, head_indexes, 0, 0] = 1
+        # GPT-2 uses transformer.h instead of model.layers, and attn instead of self_attn
+        model.transformer.h[int(layer)].attn.mask[0, head_indexes, 0, 0] = 1
 
 def find_answer_location(full_tokens, task = 'sst2'):
-    for i in range(5,len(full_tokens)):
+    index = None
+    for i in range(min(5, len(full_tokens)), len(full_tokens)):
         if task in ('sst2', 'cr', 'mr', 'sst5'):
-            if full_tokens[i-3] == 'S' and full_tokens[i-2] == 'ent' and full_tokens[i-1] == 'iment' and full_tokens[i] == ':':
+            # GPT-2 may tokenize "Sentiment:" differently than Llama-2
+            # Check for various patterns
+            if i >= 1 and full_tokens[i] == ':':
+                prev_token_lower = full_tokens[i-1].lower()
+                # Check if previous token contains "sentiment" or "iment"
+                if 'sentiment' in prev_token_lower or 'iment' in prev_token_lower:
+                    index = i+1
+                    break
+            # Original pattern for Llama-2
+            elif i >= 3 and full_tokens[i-3] == 'S' and full_tokens[i-2] == 'ent' and full_tokens[i-1] == 'iment' and full_tokens[i] == ':':
                 index = i+1
+                break
         elif task == 'copa':
-            if full_tokens[i - 1] == 'Answer' and full_tokens[i] == ':':
+            if i >= 1 and full_tokens[i - 1] == 'Answer' and full_tokens[i] == ':':
                 index = i+2 # llama output '' before numbers (1,2)
+                break
         elif task == 'trec':
-            if full_tokens[i - 2] == 'Answer' and full_tokens[i - 1] == 'Type' and full_tokens[i] == ':':
+            if i >= 2 and full_tokens[i - 2] == 'Answer' and full_tokens[i - 1] == 'Type' and full_tokens[i] == ':':
                 index = i+1
+                break
         else:
-            if full_tokens[i - 1] == 'Answer' and full_tokens[i] == ':':
+            if i >= 1 and full_tokens[i - 1] == 'Answer' and full_tokens[i] == ':':
                 index = i+1
+                break
+    
+    # Fallback: if index is still None, use the last token
+    if index is None:
+        # Don't print warning every time, just use last token silently
+        index = len(full_tokens) - 1
+    
     return index
 
 

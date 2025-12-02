@@ -37,10 +37,11 @@ Calibration = args.Calibration
 os.environ["CUDA_VISIBLE_DEVICES"]=cuda_device_id
 
 # Model setup
-device = torch.device("cuda:0")
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 # Download model from Hugging Face (will use cache if already downloaded)
-model_name = "meta-llama/Llama-2-7b-hf"  # or "meta-llama/Llama-2-13b-hf"
+# GPT-2 models: "gpt2" (117M), "gpt2-medium" (345M), "gpt2-large" (774M), "gpt2-xl" (1.5B)
+model_name = "gpt2-medium"  # Similar size to Llama-2-7b would be gpt2-large or gpt2-xl
 cache_dir = "./models"  # Local cache directory
 
 # Check if model is already cached
@@ -50,24 +51,21 @@ if os.path.exists(model_path) and os.listdir(model_path):
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
-        torch_dtype=torch.float16,
-        device_map="auto",
+        torch_dtype=torch.float32,  # GPT-2 typically uses float32
+        device_map="auto" if torch.cuda.is_available() else None,
     )
 else:
     print(f"Downloading model from Hugging Face: {model_name}")
-    # Get token from argument or environment variable
-    hf_token = args.hf_token or os.getenv("HF_TOKEN")
+    # GPT-2 doesn't require authentication token
     
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
-        token=hf_token,
         cache_dir=cache_dir
     )
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        token=hf_token,
-        torch_dtype=torch.float16,
-        device_map="auto",
+        torch_dtype=torch.float32,  # GPT-2 typically uses float32
+        device_map="auto" if torch.cuda.is_available() else None,
         cache_dir=cache_dir
     )
     
@@ -77,11 +75,17 @@ else:
     model.save_pretrained(model_path)
     print(f"Model saved to: {model_path}")
 
+# Set pad token for GPT-2 (it doesn't have one by default)
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+    model.config.pad_token_id = model.config.eos_token_id
+
 # Add custom attributes required for UniBias operations
 add_custom_attributes_to_model(model)
 
 mlm_head = model.lm_head
-norm = model.model.norm
+# GPT-2 uses transformer.ln_f instead of model.norm
+norm = model.transformer.ln_f
 record_file_path = './results/' + dataset_name + '.json'
 
 def main():
@@ -131,7 +135,8 @@ def main():
 
     # evaluate calibration methods
     if Calibration:
-        calibration_evaluation(model, all_label_probs, gt_ans_ids_list, test_sentences, test_labels, demonstration)
+        calibration_evaluation(model, all_label_probs, gt_ans_ids_list, test_sentences, test_labels, demonstration,
+                             record_file_path, dataset_name, seed_value)
 
 
 if __name__ == "__main__":

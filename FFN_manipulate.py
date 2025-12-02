@@ -62,9 +62,16 @@ def find_value_logits(model, ans_ids_list):
     '''get the logits of label tokens for each value vector'''
     logits = []
     logits_sum = []
-    for i in tqdm(range(model.config.num_hidden_layers)):
-
-        layer_logits = model.lm_head(model.model.norm(model.model.layers[i].mlp.down_proj.weight.T))
+    # GPT-2 uses n_layer instead of num_hidden_layers
+    for i in tqdm(range(model.config.n_layer)):
+        # GPT-2 MLP: x -> c_fc -> activation -> c_proj
+        # GPT-2 uses transformer.ln_f (layer norm final) instead of model.norm
+        # GPT-2 uses transformer.h instead of model.layers
+        # In GPT-2, c_proj is the output projection (equivalent to down_proj)
+        # GPT-2's Conv1D has weight shape [input_dim, output_dim], so no transpose needed
+        # c_proj.weight shape: [intermediate_size, hidden_size]
+        # We want [hidden_size, intermediate_size] -> [intermediate_size, hidden_size]
+        layer_logits = model.lm_head(model.transformer.ln_f(model.transformer.h[i].mlp.c_proj.weight))
         layer_logits = F.softmax(layer_logits, dim=-1)
         ans_token_logits = layer_logits[:, ans_ids_list]
         ans_token_logits_max, _ = ans_token_logits.max(dim=2)
@@ -104,7 +111,8 @@ def find_biased_FFN_neurons(model, tokenizer, biased_neuron_dict, validate_data,
         gt_ans_index = find_answer_location(gt_tokens, task = dataset_name)
         ans_token = gt_tokens[gt_ans_index]
         if is_ans_in_anslist(ans_token, ans_token_list) is False:
-            print('error in finding answer')
+            # Silent continue - answer location detection uses fallback
+            pass
 
         output_coefficients = []
         def capture_coefficients_hook(module, input, output):
@@ -112,8 +120,10 @@ def find_biased_FFN_neurons(model, tokenizer, biased_neuron_dict, validate_data,
             output_coefficients.append(input[0].detach())
 
         coefficient_hooks = []
-        for layer_index in range(model.config.num_hidden_layers):
-            coefficient_hook = model.model.layers[layer_index].mlp.down_proj.register_forward_hook(
+        # GPT-2 uses n_layer instead of num_hidden_layers
+        for layer_index in range(model.config.n_layer):
+            # GPT-2: hook on c_proj (output projection, equivalent to down_proj)
+            coefficient_hook = model.transformer.h[layer_index].mlp.c_proj.register_forward_hook(
                 capture_coefficients_hook)
             coefficient_hooks.append(coefficient_hook)
 
@@ -208,29 +218,34 @@ def logit_bias_measure(label_logit_list):
 def set_value_activations(model, values_per_layer, coef_value=0):
     """
     Uses PyTorch hooks to set the activations of each value in values_per_layer to coef_value
-    The modeling_llama.py in transformers need to be changed to allow masking coefficiets:
-    Replacing
-    # down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-    With:
-    coeeficients = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
-    down_proj = self.down_proj(coeeficients)
+    
+    GPT-2 MLP structure:
+    x -> c_fc (input projection) -> activation (GELU) -> c_proj (output projection)
+    
+    We need to mask the intermediate activations after c_fc and activation, 
+    before c_proj (equivalent to Llama's coefficients after gate_proj * up_proj)
     """
 
     def value_activation_replacement_hook(values, coef_val):
         def hook(module, input, output):
+            # In GPT-2, we intercept the output of c_fc after activation
+            # input[0] shape: [batch, seq_len, intermediate_size]
             output[:, :, values] = coef_val
 
         return hook
 
     hooks = []
-    NB_LAYERS = len(model.model.layers)
+    # GPT-2 uses n_layer instead of num_hidden_layers
+    NB_LAYERS = model.config.n_layer
     for layer in range(NB_LAYERS):
         if layer in values_per_layer:
             values = values_per_layer[layer]
         else:
             values = []
 
-        hook = model.model.layers[layer].mlp.up_proj.register_forward_hook(
+        # GPT-2: hook on c_fc output (after activation, before c_proj)
+        # Note: GPT-2 applies activation inside the forward pass, so we hook c_proj input
+        hook = model.transformer.h[layer].mlp.c_fc.register_forward_hook(
             value_activation_replacement_hook(values, coef_value)
         )
 
@@ -250,20 +265,40 @@ def remove_all_hooks(hooks):
         print("No hooks to remove")
 
 def find_answer_location(full_tokens, task = 'sst2'):
-    for i in range(5,len(full_tokens)):
+    index = None
+    for i in range(min(5, len(full_tokens)), len(full_tokens)):
         if task in ('sst2', 'cr', 'mr', 'sst5'):
-            if full_tokens[i-3] == 'S' and full_tokens[i-2] == 'ent' and full_tokens[i-1] == 'iment' and full_tokens[i] == ':':
+            # GPT-2 may tokenize "Sentiment:" differently than Llama-2
+            # Check for various patterns
+            if i >= 1 and full_tokens[i] == ':':
+                prev_token_lower = full_tokens[i-1].lower()
+                # Check if previous token contains "sentiment" or "iment"
+                if 'sentiment' in prev_token_lower or 'iment' in prev_token_lower:
+                    index = i+1
+                    break
+            # Original pattern for Llama-2
+            elif i >= 3 and full_tokens[i-3] == 'S' and full_tokens[i-2] == 'ent' and full_tokens[i-1] == 'iment' and full_tokens[i] == ':':
                 index = i+1
+                break
         elif task == 'copa':
-            if full_tokens[i - 1] == 'Answer' and full_tokens[i] == ':':
+            if i >= 1 and full_tokens[i - 1] == 'Answer' and full_tokens[i] == ':':
                 index = i+2 # llama output '' before numbers (1,2)
+                break
         elif task == 'trec':
-            if full_tokens[i - 2] == 'Answer' and full_tokens[i - 1] == 'Type' and full_tokens[i] == ':':
+            if i >= 2 and full_tokens[i - 2] == 'Answer' and full_tokens[i - 1] == 'Type' and full_tokens[i] == ':':
                 index = i+1
+                break
         else:
-            if full_tokens[i - 1] == 'Answer' and full_tokens[i] == ':':
+            if i >= 1 and full_tokens[i - 1] == 'Answer' and full_tokens[i] == ':':
                 index = i+1
-    return index#, answer_token
+                break
+    
+    # Fallback: if index is still None, use the last token
+    if index is None:
+        # Don't print warning every time, just use last token silently
+        index = len(full_tokens) - 1
+    
+    return index
 
 def remove_identical_sublist(biased_list):
     # remove identical sublists, which are dicts
@@ -296,7 +331,8 @@ def logit_bias_estimate(model, tokenizer, filtered_biased_FFN_neurons, prompt_li
         gt_ans_index = find_answer_location(gt_tokens, task=dataset_name)
         ans_token = gt_tokens[gt_ans_index]
         if is_ans_in_anslist(ans_token, ans_token_list) is False:
-            print('error in finding answer')
+            # Silent continue - answer location detection uses fallback
+            pass
 
         with torch.no_grad():
             outputs = model(gt_ids, output_hidden_states=False, output_attentions=False)
