@@ -57,7 +57,8 @@ def is_ans_in_anslist(ans, ans_list):
 def biased_attention_head_identification(model, tokenizer, validate_data, ans_token_list, dataset_name):
     """Identify biased attention heads candidates based on three criterions"""
     NB_LAYERS = len(model.model.layers)
-    NB_HEADS = model.model.layers[0].self_attn.num_heads
+    # Use config to get number of attention heads (compatible across transformers versions)
+    NB_HEADS = model.config.num_attention_heads
     _cumulate_all_attention_weights = [[[] for _ in range(NB_HEADS)] for _ in range(NB_LAYERS)]
     _cumulate_all_head_logit_record = [[[] for _ in range(NB_HEADS)] for _ in range(NB_LAYERS - 1)]
     _cumulate_all_hidden_logit_record = [[[] for _ in range(NB_HEADS)] for _ in range(NB_LAYERS - 1)]
@@ -78,9 +79,11 @@ def biased_attention_head_identification(model, tokenizer, validate_data, ans_to
         with torch.no_grad():
             torch.cuda.empty_cache()
 
-            hidden_states_attention = [] # the output hidden stae=tes of each attention head
+            hidden_states_attention = [] # the output hidden states of each attention head
             def capture_head_output_hook(module, input, output):
-                hidden_states_attention.append(output.detach().cpu()[:,:,-10:,])
+                # output is [bsz, num_heads, seq_len, hidden_size]
+                # We only keep the last 10 tokens
+                hidden_states_attention.append(output.detach().cpu()[:,:,-10:,:])
 
             head_output_hooks = []
             for layer_index in range(model.config.num_hidden_layers):
@@ -106,7 +109,13 @@ def biased_attention_head_identification(model, tokenizer, validate_data, ans_to
                 _cumulate_all_head_logit_record[layer_index - 1][head_i_index].append(head_i_logit)
             for head_i_index, hidden_logit in enumerate(layer_i_label_hidden_logits_record):
                 _cumulate_all_hidden_logit_record[layer_index - 1][head_i_index].append(hidden_logit)
-        del hidden_states, hidden_states_attention, attentions_layer_i, hidden_states_layer_i_1
+        
+        # Clean up memory - only delete variables that exist in this scope
+        del hidden_states, hidden_states_attention
+        if 'attentions_layer_i' in locals():
+            del attentions_layer_i
+        if 'hidden_states_layer_i_1' in locals():
+            del hidden_states_layer_i_1
 
     _cumulate_all_head_logit_record_transpose = np.array(_cumulate_all_head_logit_record).transpose(0, 1, 3, 2).tolist()
     _cumulate_all_hidden_logit_record_transpose = np.array(_cumulate_all_hidden_logit_record).transpose(0, 1, 3, 2).tolist()
@@ -349,12 +358,14 @@ def filter_biased_attention_heads(_cumulate_all_prob_change_ave, _cumulate_all_h
     return bias_head_dict
 
 def calculate_bias_logits_by_attention_heads(model, attention_matrices, hidden_states_layer_i_1, ans_index, gt_ans_ids_list):
+    # attention_matrices shape: [num_heads, seq_len, hidden_size]
     num_heads = attention_matrices.shape[0]
     heads_label_logits_record = []
     layer_i_label_hidden_logits_record=[]
 
     head_i_label_hidden_logits = decode_gt_prob(model, hidden_states_layer_i_1[ans_index - 1], gt_ans_ids_list, norm_bool=False, softmax_bool=False)
     for i in range(num_heads):
+        # attention_matrices[i][ans_index-1] is now [hidden_size] instead of [head_dim]
         head_i_label_logits = decode_gt_prob(model, attention_matrices[i][ans_index-1], gt_ans_ids_list, norm_bool=False, softmax_bool=False)
         heads_label_logits_record.append(head_i_label_logits)
         layer_i_label_hidden_logits_record.append(head_i_label_hidden_logits)

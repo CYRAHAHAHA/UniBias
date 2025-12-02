@@ -6,8 +6,14 @@ from sklearn.mixture import GaussianMixture
 from scipy.optimize import linear_sum_assignment
 from utils import *
 
-def ICL_evaluation(model, prompt_list, labels, gt_ans_ids_list, dataset_name):
-    from main import tokenizer, device
+def ICL_evaluation(model, prompt_list, labels, gt_ans_ids_list, dataset_name, tokenizer=None, device=None):
+    # Get tokenizer and device from model if not provided
+    if tokenizer is None:
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(model.config._name_or_path)
+    if device is None:
+        device = next(model.parameters()).device
+    
     predictions, all_label_probs = [], []
     for index, prompt in enumerate(prompt_list):
         print(f"Evaluating: {index+1}/{len(prompt_list)}")
@@ -45,8 +51,15 @@ def ICL_evaluation(model, prompt_list, labels, gt_ans_ids_list, dataset_name):
     final_accuracy = '\n\nclassification_accuracy: ' + str(acc)
     return final_accuracy, all_label_probs, cf
 
-def calibration_evaluation(model, all_label_probs, gt_ans_ids_list, test_sentences, test_labels, demonstration):
-    from main import record_file_path, dataset_name, seed_value
+def calibration_evaluation(model, all_label_probs, gt_ans_ids_list, test_sentences, test_labels, demonstration, 
+                          record_file_path, dataset_name, seed_value, tokenizer=None, device=None):
+    # Get tokenizer and device from model if not provided
+    if tokenizer is None:
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(model.config._name_or_path)
+    if device is None:
+        device = next(model.parameters()).device
+    
     is_sentence_pair = isinstance(test_sentences[0], list)
     # CC
     if is_sentence_pair:
@@ -56,7 +69,7 @@ def calibration_evaluation(model, all_label_probs, gt_ans_ids_list, test_sentenc
     else:
         content_free_inputs = ["N/A", "", "[MASK]"]
     content_free_prompt_list, _, _, _ = prepare_dataset_test(dataset_name, content_free_inputs, demonstration)
-    p_cc = get_p_content_free(model, content_free_prompt_list, gt_ans_ids_list, dataset_name)
+    p_cc = get_p_content_free(model, content_free_prompt_list, gt_ans_ids_list, dataset_name, tokenizer, device)
     acc_calibrated_cc, c_m = eval_accuracy(np.array(all_label_probs), test_labels, mode="diagonal_W", p_cf=p_cc)
     write_json(record_file_path, 'CC_calibrate: ' + str(acc_calibrated_cc) + str(c_m))
     print('CC_calibrate: ' + str(acc_calibrated_cc))
@@ -64,13 +77,13 @@ def calibration_evaluation(model, all_label_probs, gt_ans_ids_list, test_sentenc
     content_free_inputs = sample_random_texts(texts=test_sentences, n_sample=20, seed=seed_value)
     print(f"random texts for estimating prior: \n{content_free_inputs}")
     content_free_prompt_list, _, _, _ = prepare_dataset_test(dataset_name, content_free_inputs, demonstration)
-    p_dc = get_p_content_free(model, content_free_prompt_list, gt_ans_ids_list, dataset_name)
+    p_dc = get_p_content_free(model, content_free_prompt_list, gt_ans_ids_list, dataset_name, tokenizer, device)
     acc_calibrated_dc, c_m = eval_accuracy(np.array(all_label_probs), test_labels, mode="diagonal_W", p_cf=p_dc)
     write_json(record_file_path, 'DC_calibrate: ' + str(acc_calibrated_dc) + str(c_m))
     print('DC_calibrate: ' + str(acc_calibrated_dc))
     # PC
     estimate_prompt_list = gen_PC_calibration_data(dataset_name, demonstration)
-    estimate_label_ps, estimate_label_logps = get_logp_estimate_data(model, estimate_prompt_list, gt_ans_ids_list, dataset_name)
+    estimate_label_ps, estimate_label_logps = get_logp_estimate_data(model, estimate_prompt_list, gt_ans_ids_list, dataset_name, tokenizer, device)
     vecs = np.array(estimate_label_logps)
     max_cla = -1000000
     best_seed = 0
@@ -90,7 +103,8 @@ def calibration_evaluation(model, all_label_probs, gt_ans_ids_list, test_sentenc
     # documents_to_class = gmm.predict(vecs)
     centers = gmm.means_
     row_ind, col_ind = linear_sum_assignment(centers.max() - centers)
-    test_vecs = np.log(np.array(all_label_probs))
+    # Add small epsilon to prevent log(0) = -inf
+    test_vecs = np.log(np.array(all_label_probs) + 1e-10)
     documents_to_class = gmm.predict(test_vecs)
     predictions = [int(col_ind[documents_to_class[i]]) for i in range(len(test_vecs))]
     acc_calibrated_pc, _ = classification_accuracy(predictions, test_labels)
@@ -98,8 +112,14 @@ def calibration_evaluation(model, all_label_probs, gt_ans_ids_list, test_sentenc
     write_json(record_file_path, 'PC_calibrate: ' + str(acc_calibrated_pc) + str(c_m))
     print('PC_calibrate: ' + str(acc_calibrated_pc))
 
-def get_logp_estimate_data(model, estimate_prompt_list, gt_ans_ids_list, dataset_name):
-    from main import tokenizer, device
+def get_logp_estimate_data(model, estimate_prompt_list, gt_ans_ids_list, dataset_name, tokenizer=None, device=None):
+    # Get tokenizer and device from model if not provided
+    if tokenizer is None:
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(model.config._name_or_path)
+    if device is None:
+        device = next(model.parameters()).device
+    
     print('evaluate content free probs')
     all_p_y = []
     all_logp_y = []
@@ -128,13 +148,20 @@ def get_logp_estimate_data(model, estimate_prompt_list, gt_ans_ids_list, dataset
             for i_id_list in gt_ans_ids_list:
                 prob_i = torch.max(answer_probs[torch.tensor(i_id_list)]).item()
                 p_y.append(prob_i)
-                logp_y.append(np.log(prob_i))
+                # Add small epsilon to prevent log(0) = -inf
+                logp_y.append(np.log(prob_i + 1e-10))
             all_p_y.append(p_y)
             all_logp_y.append(logp_y)
     return all_p_y, all_logp_y
 
-def get_p_content_free(model, content_free_prompt_list, gt_ans_ids_list, dataset_name):
-    from main import tokenizer, device
+def get_p_content_free(model, content_free_prompt_list, gt_ans_ids_list, dataset_name, tokenizer=None, device=None):
+    # Get tokenizer and device from model if not provided
+    if tokenizer is None:
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(model.config._name_or_path)
+    if device is None:
+        device = next(model.parameters()).device
+    
     index = 0
     print('evaluate content free probs')
     all_p_y = []

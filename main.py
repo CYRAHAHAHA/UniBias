@@ -7,6 +7,7 @@ from FFN_manipulate import *
 from attention_manipulate import *
 from utils import *
 from evaluation import ICL_evaluation, calibration_evaluation
+from model_modifications import add_custom_attributes_to_model
 import argparse
 import random
 
@@ -20,6 +21,7 @@ parser.add_argument('--order_index',  type=int, default=None, help='Gen various 
 parser.add_argument('--num_shot',  type=int, default=1, help='Number of shot')
 parser.add_argument('--UniBias',  type=bool, default=True, help='Using UniBias or Not')
 parser.add_argument('--Calibration',  type=bool, default=True, help='Evaluate Calibration Methods or Not')
+parser.add_argument('--hf_token',  type=str, default=None, help='Hugging Face access token')
 args = parser.parse_args()
 
 cuda_device_id = args.cuda_device_id
@@ -36,14 +38,48 @@ os.environ["CUDA_VISIBLE_DEVICES"]=cuda_device_id
 
 # Model setup
 device = torch.device("cuda:0")
-# change the model path accordingly
-model_path = "/mnt/data1/Llama-2-7b-hf"
-# model_path = "/mnt/data1/Llama-2-13b-hf"
-tokenizer = AutoTokenizer.from_pretrained(model_path)
-model = AutoModelForCausalLM.from_pretrained(model_path,
-                                             torch_dtype=torch.float16,
-                                             device_map="auto",
-                                             )
+
+# Download model from Hugging Face (will use cache if already downloaded)
+model_name = "meta-llama/Llama-2-7b-hf"  # or "meta-llama/Llama-2-13b-hf"
+cache_dir = "./models"  # Local cache directory
+
+# Check if model is already cached
+model_path = os.path.join(cache_dir, model_name.replace("/", "_"))
+if os.path.exists(model_path) and os.listdir(model_path):
+    print(f"Loading model from cache: {model_path}")
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        torch_dtype=torch.float16,
+        device_map="auto",
+    )
+else:
+    print(f"Downloading model from Hugging Face: {model_name}")
+    # Get token from argument or environment variable
+    hf_token = args.hf_token or os.getenv("HF_TOKEN")
+    
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        token=hf_token,
+        cache_dir=cache_dir
+    )
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        token=hf_token,
+        torch_dtype=torch.float16,
+        device_map="auto",
+        cache_dir=cache_dir
+    )
+    
+    # Save to local directory for future use
+    os.makedirs(model_path, exist_ok=True)
+    tokenizer.save_pretrained(model_path)
+    model.save_pretrained(model_path)
+    print(f"Model saved to: {model_path}")
+
+# Add custom attributes required for UniBias operations
+add_custom_attributes_to_model(model)
+
 mlm_head = model.lm_head
 norm = model.model.norm
 record_file_path = './results/' + dataset_name + '.json'
