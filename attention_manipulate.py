@@ -273,19 +273,32 @@ def remove_attention_masks(model, AHs_dict):
         model.model.layers[int(layer)].self_attn.mask[0, head_indexes, 0, 0] = 1
 
 def find_answer_location(full_tokens, task = 'sst2'):
+    index = -1  # Default value if not found
     for i in range(5,len(full_tokens)):
         if task in ('sst2', 'cr', 'mr', 'sst5'):
             if full_tokens[i-3] == 'S' and full_tokens[i-2] == 'ent' and full_tokens[i-1] == 'iment' and full_tokens[i] == ':':
                 index = i+1
+                break
         elif task == 'copa':
             if full_tokens[i - 1] == 'Answer' and full_tokens[i] == ':':
                 index = i+2 # llama output '' before numbers (1,2)
+                break
         elif task == 'trec':
             if full_tokens[i - 2] == 'Answer' and full_tokens[i - 1] == 'Type' and full_tokens[i] == ':':
                 index = i+1
+                break
         else:
-            if full_tokens[i - 1] == 'Answer' and full_tokens[i] == ':':
+            # For custom datasets and other tasks, look for "Sentiment:" or "Answer:"
+            if full_tokens[i-3] == 'S' and full_tokens[i-2] == 'ent' and full_tokens[i-1] == 'iment' and full_tokens[i] == ':':
                 index = i+1
+                break
+            elif full_tokens[i - 1] == 'Answer' and full_tokens[i] == ':':
+                index = i+1
+                break
+    
+    if index == -1:
+        raise ValueError(f"Could not find answer location in tokens for task '{task}'. Tokens: {full_tokens[-20:]}")
+    
     return index
 
 
