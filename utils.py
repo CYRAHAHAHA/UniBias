@@ -1262,3 +1262,110 @@ def write_json(outputfile, content):
 
 
 
+def prepare_dataset_from_csv(file_path, text_col='sentence', label_col='label', num_shot=1, test_file=None, label_map=None, seed=10):
+    """Load a user CSV/JSONL dataset and produce prompt_list, labels, demonstration, test_sentences.
+
+    Parameters:
+    - file_path: path to CSV/JSONL file containing at least text_col and label_col (used as train if test_file is provided)
+    - text_col: column name with the sentence/text
+    - label_col: column name with the label (can be int or string)
+    - num_shot: number of demonstration examples per class
+    - test_file: optional path to test file (if provided, test set is loaded from here)
+    - label_map: optional dict mapping raw label values to textual tokens (e.g. {0: 'negative', 1: 'positive'})
+    - seed: random seed for reproducibility
+
+    Returns:
+    - prompt_list: list of prompts for evaluation
+    - test_labels: list of numeric labels (same ordering as prompt_list)
+    - demonstration: string containing the in-context demonstrations used for each prompt
+    - test_sentences: list of original test sentences
+    """
+    import pandas as pd
+    random.seed(seed)
+
+    # Load train (for demonstration sampling)
+    try:
+        if isinstance(file_path, str) and file_path.endswith('.csv'):
+            df = pd.read_csv(file_path)
+        elif isinstance(file_path, str):
+            # try json lines
+            df = pd.read_json(file_path, lines=True)
+        else:
+            raise ValueError('file_path must be a path string to .csv or .jsonl')
+    except Exception:
+        # fallback to datasets loader if pandas cannot read
+        from datasets import load_dataset
+        if isinstance(file_path, str) and file_path.endswith('.csv'):
+            ds = load_dataset('csv', data_files=file_path)
+        else:
+            ds = load_dataset('json', data_files=file_path)
+        df = pd.DataFrame(ds['train'])
+
+    # Load test
+    if test_file:
+        try:
+            if test_file.endswith('.csv'):
+                df_test = pd.read_csv(test_file)
+            else:
+                df_test = pd.read_json(test_file, lines=True)
+        except Exception:
+            from datasets import load_dataset
+            if test_file.endswith('.csv'):
+                ds_test = load_dataset('csv', data_files=test_file)
+            else:
+                ds_test = load_dataset('json', data_files=test_file)
+            df_test = pd.DataFrame(ds_test['train'])
+    else:
+        # Use stratified-ish split from df
+        df_shuffled = df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+        split_idx = int(len(df_shuffled) * 0.8)
+        df_train = df_shuffled.loc[:split_idx].reset_index(drop=True)
+        df_test = df_shuffled.loc[split_idx+1:].reset_index(drop=True)
+
+    # If test_file provided, use df as train
+    if test_file:
+        df_train = df
+
+    # Determine labels and mapping
+    raw_labels = df_train[label_col].unique().tolist()
+    # stable ordering
+    try:
+        raw_labels_sorted = sorted(raw_labels)
+    except Exception:
+        raw_labels_sorted = list(raw_labels)
+    if label_map is None:
+        # map raw label values to string tokens (use str of raw value)
+        label_map = {lab: str(lab) for lab in raw_labels_sorted}
+
+    # Build demonstration: sample num_shot examples per class from train
+    demonstration = ''
+    if num_shot > 0:
+        for raw_lab in raw_labels_sorted:
+            class_examples = df_train[df_train[label_col] == raw_lab][text_col].tolist()
+            if len(class_examples) >= num_shot:
+                sampled = random.sample(class_examples, num_shot)
+            else:
+                sampled = class_examples
+            for ex in sampled:
+                demonstration += f"Review: {ex}\nSentiment: {label_map[raw_lab]}\n\n"
+
+    # Build prompts for test set
+    prompt_list = []
+    test_labels = []
+    test_sentences = []
+    for _, row in df_test.iterrows():
+        text = row[text_col]
+        raw_lab = row[label_col]
+        prompt = demonstration + 'Review: ' + str(text) + '\n' + 'Sentiment:'
+        prompt_list.append(prompt)
+        # convert raw label to numeric index according to raw_labels_sorted
+        idx = int(raw_labels_sorted.index(raw_lab)) if raw_lab in raw_labels_sorted else 0
+        test_labels.append(idx)
+        test_sentences.append(str(text))
+
+    return prompt_list, test_labels, demonstration, test_sentences
+
+
+
+
+
